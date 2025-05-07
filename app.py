@@ -52,12 +52,11 @@ nodos = list(G.nodes())
 nodo_origen = st.selectbox("📍 Nodo de origen", nodos)
 nodo_destino = st.selectbox("🏁 Nodo de destino", nodos, index=min(1, len(nodos)-1))
 peso = st.radio("¿Qué quieres minimizar?", ["costo_total", "tiempo"], horizontal=True)
-
 if st.button("Calcular ruta"):
     try:
         ruta = nx.shortest_path(G, source=nodo_origen, target=nodo_destino, weight=peso)
         st.success(f"Ruta encontrada con {len(ruta)} nodos.")
-
+        
         coords = [(G.nodes[n]["y"], G.nodes[n]["x"]) for n in ruta]
         dist_total = sum(G[u][v]["distancia"] for u, v in zip(ruta[:-1], ruta[1:]))
         tiempo_total = sum(G[u][v]["tiempo"] for u, v in zip(ruta[:-1], ruta[1:]))
@@ -73,3 +72,15 @@ if st.button("Calcular ruta"):
 
     except Exception as e:
         st.error(f"No se pudo calcular la ruta: {e}")
+
+        # Mostrar ambos nodos en el mapa igualmente
+        try:
+            coord_origen = (G.nodes[nodo_origen]["y"], G.nodes[nodo_origen]["x"])
+            coord_destino = (G.nodes[nodo_destino]["y"], G.nodes[nodo_destino]["x"])
+
+            m = folium.Map(location=coord_origen, zoom_start=14)
+            Marker(coord_origen, tooltip="Origen", icon=folium.Icon(color="green")).add_to(m)
+            Marker(coord_destino, tooltip="Destino", icon=folium.Icon(color="red")).add_to(m)
+            st_folium(m, width=800, height=500)
+        except:
+            st.warning("No se pudieron ubicar los nodos en el mapa.")
