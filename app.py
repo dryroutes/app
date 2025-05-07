@@ -1,86 +1,84 @@
 import streamlit as st
 import networkx as nx
 import requests
-import gzip
+import zipfile
 import json
+import gzip
 from io import BytesIO
 import folium
 from folium import Marker, PolyLine
 from streamlit_folium import st_folium
 
 st.set_page_config(page_title="DryRoutes", layout="wide")
-st.title("🛟 Rutas seguras ante riesgo de inundación")
+st.title("🛣️ Rutas seguras ante riesgo de inundación")
 
-# ----------------- CARGA DEL GRAFO -----------------
-@st.cache_data
-def cargar_grafo_comprimido(url_nodos, url_aristas):
+# --- CONFIGURACIÓN ---
+
+# URL del ZIP en tu repositorio de GitHub (reemplaza si cambias el nombre)
+ZIP_URL = "https://huggingface.co/datasets/dryroutes/grafo/resolve/main/grafo_tiny.zip"
+
+# --- CARGA DEL GRAFO DESDE ZIP ---
+
+@st.cache_data(show_spinner="Descargando y reconstruyendo el grafo...")
+def cargar_grafo_desde_zip(url_zip):
+    response = requests.get(url_zip)
+    z = zipfile.ZipFile(BytesIO(response.content))
+
     G = nx.DiGraph()
 
-    # Cargar nodos (solo con id, x, y)
-    response_n = requests.get(url_nodos)
-    with gzip.open(BytesIO(response_n.content), "rt", encoding="utf-8") as f:
-        nodos = json.load(f)
-    for nodo in nodos:
-        G.add_node(nodo["id"], x=nodo["x"], y=nodo["y"])
+    # Cargar nodos
+    for filename in sorted(z.namelist()):
+        if filename.startswith("nodos") and filename.endswith(".json.gz"):
+            with z.open(filename) as f:
+                with gzip.open(f, "rt", encoding="utf-8") as gzf:
+                    nodos = json.load(gzf)
+                    for nodo in nodos:
+                        G.add_node(nodo["id"], x=nodo["x"], y=nodo["y"])
 
     # Cargar aristas
-    response_e = requests.get(url_aristas)
-    with gzip.open(BytesIO(response_e.content), "rt", encoding="utf-8") as f:
-        aristas = json.load(f)
-    for arista in aristas:
-        G.add_edge(arista["origen"], arista["destino"],
-                   costo_total=arista["costo_total"],
-                   tiempo=arista["tiempo"],
-                   distancia=arista["distancia"],
-                   altura_media=arista.get("altura_media", 0))
+    for filename in sorted(z.namelist()):
+        if filename.startswith("aristas") and filename.endswith(".json.gz"):
+            with z.open(filename) as f:
+                with gzip.open(f, "rt", encoding="utf-8") as gzf:
+                    aristas = json.load(gzf)
+                    for a in aristas:
+                        G.add_edge(a["origen"], a["destino"],
+                                   costo_total=a.get("costo_total", 1),
+                                   tiempo=a.get("tiempo", 1),
+                                   distancia=a.get("distancia", 1))
 
     return G
 
-# ----------------- URLs de Hugging Face -----------------
-URL_NODOS = "https://huggingface.co/datasets/dryroutes/grafo/resolve/main/nodos.json.gz"
-URL_ARISTAS = "https://huggingface.co/datasets/dryroutes/grafo/resolve/main/aristas.json.gz"
+# --- CARGAR EL GRAFO ---
 
-# ----------------- Cargar y mostrar -----------------
-with st.spinner("Cargando grafo desde Hugging Face..."):
-    G = cargar_grafo_comprimido(URL_NODOS, URL_ARISTAS)
-    st.success(f"Grafo cargado con {G.number_of_nodes()} nodos y {G.number_of_edges()} aristas.")
+with st.spinner("Cargando grafo..."):
+    G = cargar_grafo_desde_zip(ZIP_URL)
+st.success(f"Grafo cargado con {G.number_of_nodes()} nodos y {G.number_of_edges()} aristas.")
 
-# ----------------- Selección de nodos -----------------
-nodos = list(G.nodes())
-nodo_origen = st.selectbox("📍 Nodo de origen", nodos)
-nodo_destino = st.selectbox("🏁 Nodo de destino", nodos, index=min(1, len(nodos)-1))
-peso = st.radio("¿Qué quieres minimizar?", ["costo_total", "tiempo"], horizontal=True)
+# --- INTERFAZ DE USUARIO ---
 
-# ----------------- Cálculo y visualización de ruta -----------------
+nodos_disponibles = list(G.nodes)
+origen = st.selectbox("📍 Nodo de origen", nodos_disponibles)
+destino = st.selectbox("🏁 Nodo de destino", nodos_disponibles)
+criterio = st.radio("¿Qué quieres minimizar?", ["costo_total", "tiempo"])
+
 if st.button("Calcular ruta"):
     try:
-        ruta = nx.shortest_path(G, source=nodo_origen, target=nodo_destino, weight=peso)
-        st.success(f"Ruta encontrada con {len(ruta)} nodos.")
+        ruta = nx.shortest_path(G, source=origen, target=destino, weight=criterio)
+        longitud = nx.shortest_path_length(G, source=origen, target=destino, weight=criterio)
+        st.success(f"Ruta encontrada con {len(ruta)} nodos. {criterio} total: {longitud:.2f}")
 
-        coords = [(G.nodes[n]["y"], G.nodes[n]["x"]) for n in ruta]
-        dist_total = sum(G[u][v]["distancia"] for u, v in zip(ruta[:-1], ruta[1:]))
-        tiempo_total = sum(G[u][v]["tiempo"] for u, v in zip(ruta[:-1], ruta[1:]))
+        # --- VISUALIZACIÓN DEL MAPA ---
+        m = folium.Map(location=[G.nodes[origen]["y"], G.nodes[origen]["x"]], zoom_start=13)
+        coordenadas = [(G.nodes[n]["y"], G.nodes[n]["x"]) for n in ruta]
 
-        st.markdown(f"🛣️ **Distancia total**: `{dist_total:.1f} m`")
-        st.markdown(f"⏱️ **Tiempo estimado**: `{tiempo_total:.1f} min`")
+        # Marcar origen y destino
+        Marker(coordenadas[0], tooltip="Origen").add_to(m)
+        Marker(coordenadas[-1], tooltip="Destino").add_to(m)
 
-        m = folium.Map(location=coords[0], zoom_start=14)
-        PolyLine(coords, color="blue", weight=5).add_to(m)
-        Marker(coords[0], tooltip="Origen", icon=folium.Icon(color="green")).add_to(m)
-        Marker(coords[-1], tooltip="Destino", icon=folium.Icon(color="red")).add_to(m)
-        st_folium(m, width=800, height=500)
+        # Dibujar ruta
+        PolyLine(coordenadas, color="blue", weight=5).add_to(m)
+        st_folium(m, width=1000, height=600)
 
-    except Exception as e:
-        st.error(f"No se pudo calcular la ruta: {e}")
-
-        # Mostrar nodos aunque no haya ruta
-        try:
-            coord_origen = (G.nodes[nodo_origen]["y"], G.nodes[nodo_origen]["x"])
-            coord_destino = (G.nodes[nodo_destino]["y"], G.nodes[nodo_destino]["x"])
-
-            m = folium.Map(location=coord_origen, zoom_start=14)
-            Marker(coord_origen, tooltip="Origen", icon=folium.Icon(color="green")).add_to(m)
-            Marker(coord_destino, tooltip="Destino", icon=folium.Icon(color="red")).add_to(m)
-            st_folium(m, width=800, height=500)
-        except:
-            st.warning("No se pudieron ubicar los nodos en el mapa.")
+    except nx.NetworkXNoPath:
+        st.error("❌ No se pudo calcular la ruta: no hay camino entre los nodos seleccionados.")
